@@ -10,9 +10,9 @@ from reportlab.lib.pagesizes import cm
 from reportlab.lib.colors import Color, yellow, black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+import pypdf
 
 # Türkçe karakter desteği için font ayarı
-# NOT: GitHub repo'suna 'arial.ttf' veya 'DejaVuSans.ttf' dosyasını eklerseniz kusursuz çalışır.
 FONT_NAME = 'Helvetica'
 if os.path.exists('arial.ttf'):
     try:
@@ -29,12 +29,12 @@ elif os.path.exists('DejaVuSans.ttf'):
 
 st.set_page_config(page_title="ROYALGROSS Etiket Otomasyonu", layout="wide", page_icon="📦")
 st.title("📦 ROYALGROSS Günlük Etiket ve Barkod Otomasyonu")
-st.markdown("*(Trendyol 10x10 cm | Hepsiburada 10x15 cm)*")
+st.markdown("*(Trendyol 10x10 cm | Hepsiburada Orijinal Barkod Korunur + Personel Damgası)*")
 
 st.sidebar.header("⚙️ Personel Ayarları")
 personel_input = st.sidebar.text_area(
-    "Personel İsimleri (Her satıra bir isim yazın)", 
-    "Ahmet\nAyşe\nMehmet"
+    "Personel İsimleri veya Kodları (Her satıra bir tane)", 
+    "Ahmet (Kod: 01)\nAyşe (Kod: 02)\nMehmet (Kod: 03)"
 )
 personel_list = [p.strip() for p in personel_input.split('\n') if p.strip()]
 
@@ -49,8 +49,8 @@ def generate_barcode_image(code):
     code128.write(buffer, options={"module_width": 0.2, "module_height": 10.0, "font_size": 8})
     return buffer
 
-def process_trendyol_excel(uploaded_file):
-    """Trendyol Excel'ini okur, çoklu ürünleri birleştirir ve 10x10 cm PDF üretir"""
+def process_trendyol_excel(uploaded_file, personel_list):
+    """Trendyol Excel'ini okur, çoklu ürünleri birleştirir, personel atar ve 10x10 cm PDF üretir"""
     df = pd.read_excel(uploaded_file)
     df.columns = df.columns.str.strip()
     
@@ -60,7 +60,8 @@ def process_trendyol_excel(uploaded_file):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=(10*cm, 10*cm))
     
-    for order_code, group in grouped:
+    for idx, (order_code, group) in enumerate(grouped):
+        assigned_person = personel_list[idx % len(personel_list)] if personel_list else "Atanmadı"
         barcode_val = str(group['Kampanya Kodu'].iloc[0]) if 'Kampanya Kodu' in group.columns and pd.notna(group['Kampanya Kodu'].iloc[0]) else str(order_code)
         
         customer = str(group['Sipariş Veren Cari'].iloc[0]) if 'Sipariş Veren Cari' in group.columns else "Müşteri"
@@ -99,92 +100,83 @@ def process_trendyol_excel(uploaded_file):
                 c.drawString(1*cm, y_pos, prod)
             y_pos -= 0.5*cm
             
+        # --- PERSONEL DAMGASI (Trendyol) ---
+        c.setFillColor(yellow)
+        c.rect(1*cm, 0.5*cm, 8*cm, 1.5*cm, fill=1, stroke=1)
+        c.setFillColor(black)
+        c.setFont(FONT_NAME, 9)
+        c.drawCentredString(5*cm, 1.6*cm, "DEPO PERSONELİ:")
+        c.setFont(FONT_NAME, 12)
+        c.drawCentredString(5*cm, 0.9*cm, assigned_person)
+            
         c.showPage()
     
     c.save()
     return buffer.getvalue(), len(grouped)
 
-def process_hepsiburada_pdf(uploaded_file):
-    """Hepsiburada PDF'ini okur, personel atar ve 10x15 cm PDF üretir"""
-    orders = []
-    with pdfplumber.open(uploaded_file) as pdf:
-        text = ""
-        for page in pdf.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+def process_hepsiburada_pdf(uploaded_file, personel_list):
+    """Hepsiburada PDF'ini okur, ÜRÜN BAZLI sıralar, ORİJİNAL barkodu korur ve personel damgası ekler"""
+    reader = pypdf.PdfReader(uploaded_file)
+    writer = pypdf.PdfWriter()
     
-    # "SİPARİŞ KODU:" ifadesine göre parçala
-    blocks = text.split("SİPARİŞ KODU:")
-    for block in blocks[1:]:
-        lines = [line.strip() for line in block.split('\n') if line.strip()]
-        order_data = {"order_code": "", "customer": "", "address": "", "products": []}
+    page_info = []
+    # 1. Tüm sayfaları gez, ürün adını ve sipariş kodunu çıkar
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
         
-        for i, line in enumerate(lines):
-            if "SİPARİŞ TARİHİ:" in line:
-                order_data["order_code"] = line.split("-")[0].replace("SİPARİŞ KODU:", "").strip()
-            elif "ALICI BİLGİLERİ:" in line:
-                order_data["customer"] = line.replace("ALICI BİLGİLERİ:", "").strip()
-            elif "Adres:" in line and "Telefon:" in line:
-                parts = line.split("Telefon:")
-                order_data["address"] = parts[0].replace("Adres:", "").strip()
-            elif "ÜRÜN KODU/ ADI" in line or "ADET" in line:
-                continue
-            elif re.match(r'^[A-Za-z0-9].*\/.*', line) and len(line) > 10 and "ROYALGROSS" not in line:
-                parts = line.split('/')
-                if len(parts) >= 2:
-                    prod_name = parts[1].strip()
-                    qty_match = re.search(r'(\d+)\s*$', line)
-                    qty = qty_match.group(1) if qty_match else "1"
-                    # Aynı ürünü tekrar ekleme
-                    prod_str = f"{qty}x {prod_name}"
-                    if prod_str not in order_data["products"]:
-                        order_data["products"].append(prod_str)
+        # Ürün adını yakala (Hepsiburada formatına göre)
+        product_match = re.search(r'ÜRÜN KODU/ ADI\s+ADET\s+(.+?)(?=\n|$)', text, re.IGNORECASE | re.DOTALL)
+        product_name = product_match.group(1).strip() if product_match else f"Sayfa {i+1}"
         
-        if order_data["order_code"]:
-            orders.append(order_data)
-
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=(10*cm, 15*cm))
+        # Sipariş kodunu da yedek olarak al
+        order_match = re.search(r'SİPARİŞ KODU:\s*(.+?)(?=\n|$)', text)
+        order_code = order_match.group(1).strip() if order_match else ""
+        
+        page_info.append({
+            "index": i,
+            "product": product_name,
+            "order": order_code,
+            "page": page
+        })
     
-    for i, order in enumerate(orders):
-        assigned_person = personel_list[i % len(personel_list)] if personel_list else "Atanmadı"
-        barcode_val = order["order_code"].replace("-", "").strip()
+    # 2. ÜRÜN BAZLI SIRALAMA (Aynı ürünler yan yana gelir)
+    page_info.sort(key=lambda x: x["product"])
+    
+    # 3. Personel ataması yap ve damgayı orijinal sayfanın üzerine ekle
+    for idx, info in enumerate(page_info):
+        assigned_person = personel_list[idx % len(personel_list)] if personel_list else "Atanmadı"
+        page = info["page"]
         
-        # --- 10x15 cm ÇİZİM ---
-        barcode_img = generate_barcode_image(barcode_val)
-        c.drawImage(barcode_img, 1*cm, 12*cm, width=8*cm, height=2*cm)
+        # Sayfa boyutlarını al (10x15 cm veya başka bir boyut olabilir, dinamik olarak alıyoruz)
+        page_box = page.mediabox
+        width = float(page_box.width)
+        height = float(page_box.height)
         
-        c.setFont(FONT_NAME, 10)
-        c.drawString(1*cm, 11.5*cm, f"Sipariş: {order['order_code']}")
-        c.drawString(1*cm, 11*cm, f"Müşteri: {order['customer']}")
+        # Personel damgası için geçici bir PDF oluştur
+        packet = io.BytesIO()
+        c = canvas.Canvas(packet, pagesize=(width, height))
         
-        addr_text = order['address']
-        if len(addr_text) > 50:
-            c.drawString(1*cm, 10.5*cm, addr_text[:47] + "...")
-            c.drawString(1*cm, 10*cm, addr_text[47:])
-        else:
-            c.drawString(1*cm, 10.5*cm, addr_text)
-            
-        c.setFont(FONT_NAME, 8)
-        y_pos = 9.5*cm
-        for prod in order["products"]:
-            c.drawString(1*cm, y_pos, prod)
-            y_pos -= 0.4*cm
-            
-        # Personel Damgası (Sarı Kutu)
+        # Sağ alt köşeye veya ortaya sarı kutu çiz
+        box_w, box_h = 130, 45
         c.setFillColor(yellow)
-        c.rect(6*cm, 1*cm, 3.5*cm, 1.5*cm, fill=1, stroke=1)
+        c.rect(width - 140, 10, box_w, box_h, fill=1, stroke=1)
         c.setFillColor(black)
         c.setFont(FONT_NAME, 10)
-        c.drawCentredString(7.75*cm, 1.75*cm, "PERSONEL:")
-        c.setFont(FONT_NAME, 12)
-        c.drawCentredString(7.75*cm, 1.25*cm, assigned_person)
+        c.drawCentredString(width - 75, 40, "DEPO PERSONELİ:")
+        c.setFont(FONT_NAME, 13)
+        c.drawCentredString(width - 75, 20, assigned_person)
+        c.save()
         
-        c.showPage()
-    
-    c.save()
-    return buffer.getvalue(), len(orders)
+        packet.seek(0)
+        stamp_pdf = pypdf.PdfReader(packet)
+        
+        # Orijinal sayfaya damgayı birleştir (Barkod ve diğer her şey %100 korunur)
+        page.merge_page(stamp_pdf.pages[0])
+        writer.add_page(page)
+        
+    out_buffer = io.BytesIO()
+    writer.write(out_buffer)
+    return out_buffer.getvalue(), len(page_info)
 
 # --- ARAYÜZ ---
 st.markdown("---")
@@ -192,13 +184,13 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📦 Trendyol İşlemleri (10x10 cm)")
-    st.write("Sentos Excel çıktısını yükleyin. Aynı siparişteki ürünler otomatik tek etikette birleştirilir.")
+    st.write("Sentos Excel çıktısını yükleyin. Aynı siparişteki ürünler tek etikette birleştirilir, personel kodu eklenir.")
     trendyol_file = st.file_uploader("Trendyol Excel (.xlsx)", type=["xlsx"])
     if st.button("Trendyol Etiketlerini Oluştur", type="primary", use_container_width=True):
         if trendyol_file:
             with st.spinner("İşleniyor, lütfen bekleyin..."):
                 try:
-                    pdf_bytes, count = process_trendyol_excel(trendyol_file)
+                    pdf_bytes, count = process_trendyol_excel(trendyol_file, personel_list)
                     st.success(f"✅ {count} adet sipariş için etiket oluşturuldu!")
                     st.download_button("📥 PDF İndir", data=pdf_bytes, file_name="Trendyol_Etiketler.pdf", mime="application/pdf")
                 except Exception as e:
@@ -207,15 +199,15 @@ with col1:
             st.warning("Lütfen bir Excel dosyası yükleyin.")
 
 with col2:
-    st.subheader("📦 Hepsiburada İşlemleri (10x15 cm)")
-    st.write("Hepsiburada PDF etiketlerini yükleyin. Personel dağılımı otomatik ve dengeli yapılır.")
+    st.subheader("📦 Hepsiburada İşlemleri (Orijinal Barkod Korunur)")
+    st.write("PDF yükleyin. Sistem barkodu BOZMAZ, sadece sayfaları ürün bazında sıralar ve personel kodunu damgalar.")
     hb_file = st.file_uploader("Hepsiburada PDF (.pdf)", type=["pdf"])
     if st.button("Hepsiburada Etiketlerini Oluştur", type="primary", use_container_width=True):
         if hb_file:
             with st.spinner("İşleniyor, lütfen bekleyin..."):
                 try:
-                    pdf_bytes, count = process_hepsiburada_pdf(hb_file)
-                    st.success(f"✅ {count} adet sipariş için etiket oluşturuldu!")
+                    pdf_bytes, count = process_hepsiburada_pdf(hb_file, personel_list)
+                    st.success(f"✅ {count} adet sayfa işlendi ve sıralandı!")
                     st.download_button("📥 PDF İndir", data=pdf_bytes, file_name="Hepsiburada_Etiketler.pdf", mime="application/pdf")
                 except Exception as e:
                     st.error(f"Hata oluştu: {str(e)}")
