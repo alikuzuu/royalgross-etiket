@@ -6,7 +6,7 @@ import os
 from barcode import Code128
 from barcode.writer import ImageWriter
 from reportlab.pdfgen import canvas
-from reportlab.lib.units import cm  # ← BURASI DÜZELTİLDİ
+from reportlab.lib.units import cm
 from reportlab.lib.colors import Color, yellow, black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -28,15 +28,23 @@ elif os.path.exists('DejaVuSans.ttf'):
         pass
 
 st.set_page_config(page_title="ROYALGROSS Etiket Otomasyonu", layout="wide", page_icon="📦")
+
+# Başlık
 st.title("📦 ROYALGROSS Günlük Etiket ve Barkod Otomasyonu")
 st.markdown("*(Trendyol 10x10 cm | Hepsiburada Orijinal Barkod Korunur + Personel Damgası)*")
+st.markdown("---")
 
+# Sidebar - Personel Ayarları
 st.sidebar.header("⚙️ Personel Ayarları")
 personel_input = st.sidebar.text_area(
     "Personel İsimleri veya Kodları (Her satıra bir tane)", 
     "Ahmet (Kod: 01)\nAyşe (Kod: 02)\nMehmet (Kod: 03)"
 )
 personel_list = [p.strip() for p in personel_input.split('\n') if p.strip()]
+
+st.sidebar.info("🖨️ **Yazıcı Boyutları:**\n- Trendyol: 10x10 cm\n- Hepsiburada: 10x15 cm")
+st.sidebar.markdown("---")
+st.sidebar.caption("💡 Türkçe karakterler için `arial.ttf` dosyasını repo'ya ekleyin.")
 
 def generate_barcode_image(code):
     """Verilen koddan Code128 barkod görseli oluşturur"""
@@ -54,7 +62,6 @@ def process_trendyol_excel(uploaded_file, personel_list):
     df = pd.read_excel(uploaded_file)
     df.columns = df.columns.str.strip()
     
-    # Sipariş Koduna göre grupla (Çoklu ürünleri tek etikette toplar)
     grouped = df.groupby('Sipariş Kodu')
     
     buffer = io.BytesIO()
@@ -85,4 +92,42 @@ def process_trendyol_excel(uploaded_file, personel_list):
         
         full_address = f"{address} {city}"
         if len(full_address) > 55:
-            c
+            c.drawString(1*cm, 6*cm, full_address[:52] + "...")
+        else:
+            c.drawString(1*cm, 6*cm, full_address)
+            
+        c.setFont(FONT_NAME, 8)
+        y_pos = 5.5*cm
+        for prod in products:
+            if len(prod) > 45:
+                c.drawString(1*cm, y_pos, prod[:42] + "...")
+                y_pos -= 0.4*cm
+                c.drawString(1.5*cm, y_pos, prod[42:])
+            else:
+                c.drawString(1*cm, y_pos, prod)
+            y_pos -= 0.5*cm
+            
+        # --- PERSONEL DAMGASI ---
+        c.setFillColor(yellow)
+        c.rect(1*cm, 0.5*cm, 8*cm, 1.5*cm, fill=1, stroke=1)
+        c.setFillColor(black)
+        c.setFont(FONT_NAME, 9)
+        c.drawCentredString(5*cm, 1.6*cm, "DEPO PERSONELİ:")
+        c.setFont(FONT_NAME, 12)
+        c.drawCentredString(5*cm, 0.9*cm, assigned_person)
+            
+        c.showPage()
+    
+    c.save()
+    return buffer.getvalue(), len(grouped)
+
+def process_hepsiburada_pdf(uploaded_file, personel_list):
+    """Hepsiburada PDF'ini okur, ÜRÜN BAZLI sıralar, ORİJİNAL barkodu korur ve personel damgası ekler"""
+    reader = pypdf.PdfReader(uploaded_file)
+    writer = pypdf.PdfWriter()
+    
+    page_info = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        
+        product_match = re.search(r'ÜRÜN KODU/ ADI\s+ADET\s+(.+?)(
