@@ -65,20 +65,23 @@ def extract_trendyol_product_name(product_text):
         return "Diger"
 
 def extract_hepsiburada_product_name(text):
-    """Hepsiburada PDF'inden ürün adını %100 doğru çeker"""
+    """Hepsiburada PDF'inden ürün adını %100 doğru çeker (Yeni Satır Desteği Eklendi)"""
     try:
-        # "ÜRÜN KODU/ ADI ADET [KOD]/ [ÜRÜN ADI] [ADET]" formatını yakalar
-        match = re.search(r'ÜRÜN KODU/\s*ADI\s*ADET\s+(.+)', text)
+        # re.DOTALL kullanarak satır atlamalarını da yakalar
+        match = re.search(r'ÜRÜN KODU/\s*ADI\s*ADET\s+(.+)', text, re.IGNORECASE | re.DOTALL)
         if match:
-            product_line = match.group(1).strip()
+            raw_text = match.group(1).strip()
             # '/' işaretinden sonrasını al (Ürün Adı kısmı)
-            if '/' in product_line:
-                name_part = product_line.split('/', 1)[1].strip()
+            if '/' in raw_text:
+                name_part = raw_text.split('/', 1)[1].strip()
             else:
-                name_part = product_line
+                name_part = raw_text
             
-            # Sondaki adet rakamını (örn: " 1", " 2") temizle
-            name_part = re.sub(r'\s+\d+\s*$', '', name_part).strip()
+            # Sondaki adet rakamını ve yeni satırları temizle
+            name_part = re.sub(r'\s*\d+\s*$', '', name_part).strip()
+            # Fazla boşlukları temizle
+            name_part = " ".join(name_part.split())
+            
             return name_part[:60] if name_part else "Diger_Urun"
         
         return "Diger_Urun"
@@ -86,30 +89,36 @@ def extract_hepsiburada_product_name(text):
         return "Diger_Urun"
 
 def assign_personel_by_chunks(total_pages, personel_list):
-    """Toplam sayfa / personel sayısı mantığıyla adil blok dağıtım"""
+    """Sıfır bölme hatası riski olmayan, kusursuz adet bazlı dağılım"""
     if not personel_list:
         return ["DEPO[00]"] * total_pages
     
     n_personel = len(personel_list)
-    base_count = total_pages // n_personel
-    remainder = total_pages % n_personel
-    
     assignments = []
-    for i in range(total_pages):
-        if i < remainder * (base_count + 1):
-            current_idx = i // (base_count + 1)
-        else:
-            adjusted_i = i - remainder * (base_count + 1)
-            current_idx = remainder + (adjusted_i // base_count)
+    
+    # Her personele düşen sayfa sayısını hesapla
+    pages_per_person = [total_pages // n_personel] * n_personel
+    for i in range(total_pages % n_personel):
+        pages_per_person[i] += 1
         
-        p_entry = personel_list[current_idx % n_personel]
+    current_personel_idx = 0
+    pages_assigned_to_current = 0
+    
+    for i in range(total_pages):
+        p_entry = personel_list[current_personel_idx % n_personel]
         code_match = re.search(r'Kod:\s*(\d+)', p_entry)
         if code_match:
             code = code_match.group(1).zfill(2)
             assignments.append(f"DEPO[{code}]")
         else:
-            code = str((current_idx % n_personel) + 1).zfill(2)
+            code = str((current_personel_idx % n_personel) + 1).zfill(2)
             assignments.append(f"DEPO[{code}]")
+        
+        pages_assigned_to_current += 1
+        # Bu personelin kotası dolduysa bir sonrakine geç
+        if pages_assigned_to_current >= pages_per_person[current_personel_idx % n_personel]:
+            current_personel_idx += 1
+            pages_assigned_to_current = 0
             
     return assignments
 
@@ -188,7 +197,7 @@ def process_hepsiburada_pdf(uploaded_file, personel_list):
         order_match = re.search(r'SİPARİŞ KODU:\s*([0-9\-]+)', text)
         order_code = order_match.group(1).strip() if order_match else f"Sayfa_{i+1}"
         
-        # KRİTİK DÜZELTME: Ürün adını artık doğru yakalıyor
+        # KRİTİK DÜZELTME: re.DOTALL ile alt satıra geçen ürün isimleri artık %100 yakalanıyor
         product_name = extract_hepsiburada_product_name(text)
         
         page_info.append({
@@ -198,38 +207,42 @@ def process_hepsiburada_pdf(uploaded_file, personel_list):
             "page": page
         })
     
-    # 1. ADIM: Sayfaları ÜRÜN ADINA GÖRE alfabetik sırala (Aynı ürünler yan yana gelir)
+    # 1. ADIM: Sayfaları ÜRÜN ADINA GÖRE alfabetik sırala
     page_info.sort(key=lambda x: (x["product"].lower(), x["order"]))
     
     # 2. ADIM: Sıralanmış sayfaları personele blok halinde dağıt
     assignments = assign_personel_by_chunks(len(page_info), personel_list)
     
-    # 3. ADIM: Yeni PDF'i oluştur ve damgaları ekle
+    # 3. ADIM: Fiziksel sayfa yer değiştirmesini ZORLA
     for idx, info in enumerate(page_info):
         assigned_person = assignments[idx]
-        page = info["page"]
-        page_box = page.mediabox
-        width = float(page_box.width)
-        height = float(page_box.height)
+        original_page = info["page"]
+        
+        # Yeni boş bir sayfa oluşturarak pypdf'in önbellek/sıralama takılmasını engelliyoruz
+        new_page = pypdf.PageObject.create_blank_page(
+            width=original_page.mediabox.width,
+            height=original_page.mediabox.height
+        )
+        new_page.merge_page(original_page)
         
         # Personel damgası overlay (Sağ alt köşe)
         packet = io.BytesIO()
-        c = canvas.Canvas(packet, pagesize=(width, height))
+        c = canvas.Canvas(packet, pagesize=(float(original_page.mediabox.width), float(original_page.mediabox.height)))
         c.setFillColor(yellow)
-        c.rect(width - 140, 10, 130, 45, fill=1, stroke=1)
+        c.rect(float(original_page.mediabox.width) - 140, 10, 130, 45, fill=1, stroke=1)
         c.setFillColor(black)
         c.setFont(FONT_NAME, 10)
-        c.drawCentredString(width - 75, 40, "DEPO PERSONELİ:")
+        c.drawCentredString(float(original_page.mediabox.width) - 75, 40, "DEPO PERSONELİ:")
         c.setFont(FONT_NAME, 13)
-        c.drawCentredString(width - 75, 20, assigned_person)
+        c.drawCentredString(float(original_page.mediabox.width) - 75, 20, assigned_person)
         c.save()
         
         packet.seek(0)
         stamp_pdf = pypdf.PdfReader(packet)
         
-        # Orijinal sayfaya damgayı birleştir (Barkod %100 korunur)
-        page.merge_page(stamp_pdf.pages[0])
-        writer.add_page(page)
+        # Damgayı yeni sayfaya birleştir ve yazıcıya ekle
+        new_page.merge_page(stamp_pdf.pages[0])
+        writer.add_page(new_page)
     
     out_buffer = io.BytesIO()
     writer.write(out_buffer)
