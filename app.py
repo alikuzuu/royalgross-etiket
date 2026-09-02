@@ -317,4 +317,27 @@ if trendyol_file is not None:
                 st.success(f"✅ {count} adet sipariş için 10x10 cm etiket oluşturuldu!")
                 st.download_button(" Trendyol PDF'ini İndir", data=pdf_bytes, file_name="Trendyol_Etiketler.pdf", mime="application/pdf", use_container_width=True)
             except Exception as e:
-                st.error(f"❌ Hata oluştu: {
+                st.error(f"❌ Hata oluştu: {str(e)}")
+else:
+    st.info("👆 Yukarıdan bir Excel dosyası seçin.")
+
+st.markdown("---")
+
+st.subheader("📦 HEPSİBURADA İŞLEMLERİ (10x15 cm)")
+st.write("PDF yükleyin. Sistem barkodu BOZMAZ, sayfaları **ÜRÜN BAZINDA** sıralar ve **Royal001** formatında personel kodu ekler.")
+hb_file = st.file_uploader("Hepsiburada PDF dosyasını seçin (.pdf)", type=["pdf"], key="hepsiburada_uploader")
+if hb_file is not None:
+    st.success(f"✅ Dosya yüklendi: {hb_file.name}")
+    if st.button("🚀 Hepsiburada Etiketlerini Oluştur", type="primary", use_container_width=True):
+        with st.spinner("İşleniyor, lütfen bekleyin..."):
+            try:
+                pdf_bytes, count = process_hepsiburada_pdf(hb_file, personel_list)
+                st.success(f"✅ {count} adet sayfa işlendi ve ürün bazında sıralandı!")
+                st.download_button("📥 Hepsiburada PDF'ini İndir", data=pdf_bytes, file_name="Hepsiburada_Etiketler.pdf", mime="application/pdf", use_container_width=True)
+            except Exception as e:
+                st.error(f"❌ Hata oluştu: {str(e)}")
+else:
+    st.info("👆 Yukarıdan bir PDF dosyası seçin.")
+
+st.markdown("---")
+st.caption("🏭 ROYALGROSS EV GEREÇLERİ DIŞ TİCARET LİMİTED ŞİRKETİ - Otomatik Etiket Sistemi")
